@@ -29,3 +29,5 @@ hf download RLinf/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT \
 # --local-dir /workspace/RLinf/rlinf/envs/maniskill/assets
 
 bash examples/embodiment/run_embodiment.sh maniskill_ppo_openpi
+
+bash examples/embodiment/run_embodiment.sh libero_spatial_ppo_openpi_quickstart
