@@ -268,6 +268,28 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         actions = data["actions"]
         return PI0Pytorch.forward(self, observation, actions)
 
+    def awr_forward(self, data, **kwargs):
+        observation = data["observation"]
+        actions = data["actions"]
+        # PI0Pytorch.forward returns per-step reconstruction loss (MSE) which is the
+        # negative ELBO term for the flow-matching head. Use its negative as a
+        # surrogate log-probability for AWR style weighting.
+        elbo = PI0Pytorch.forward(self, observation, actions)
+        logprobs = -elbo
+
+        # Align shape with action chunk/env dim if present
+        if logprobs.dim() >= 3:
+            logprobs = logprobs[
+                :, : self.config.action_chunk, : self.config.action_env_dim
+            ]
+
+        return {
+            "logprobs": logprobs,
+            "values": None,
+            "entropy": None,
+            "elbo": elbo,
+        }
+
     def default_forward(
         self,
         data: dict[str, torch.Tensor],
