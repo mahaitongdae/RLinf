@@ -20,7 +20,7 @@ echo "Installing Vulkan and EGL libraries..."
 sudo apt-get update
 sudo apt-get install -y \
     libvulkan1 \
-    libnvidia-gl-570 \
+    libnvidia-gl-570-server \
     libglvnd-dev \
     vulkan-tools
 
