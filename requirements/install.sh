@@ -1,6 +1,19 @@
 #! /bin/bash
 
+
 set -euo pipefail
+
+# Replace 'my-storage' with the actual name of your Lambda filesystem
+export PERSISTENT_ROOT="/lambda/nfs/haitong-south-2"
+
+# Move Python interpreters here
+export UV_PYTHON_INSTALL_DIR="$PERSISTENT_ROOT/.uv/python"
+
+# Move the cache (highly recommended for speed and space)
+export UV_CACHE_DIR="$PERSISTENT_ROOT/.uv/cache"
+
+# Move tool binaries
+export UV_TOOL_DIR="$PERSISTENT_ROOT/.uv/tools"
 
 TARGET=""
 

@@ -23,6 +23,8 @@ import tqdm
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
 
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from toolkits.eval_scripts_openpi import setup_logger, setup_policy
 
 os.environ["MUJOCO_GL"] = "egl"

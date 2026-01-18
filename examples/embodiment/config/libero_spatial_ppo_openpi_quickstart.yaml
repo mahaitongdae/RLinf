@@ -23,7 +23,7 @@ runner:
     log_path: "../results"
     project_name: rlinf
     experiment_name: "libero_spatial_ppo_openpi"
-    logger_backends: ["tensorboard"] # wandb, swanlab
+    logger_backends: ["tensorboard", "wandb"] # wandb, swanlab
 
   max_epochs: 1000
   max_steps: -1
@@ -32,7 +32,8 @@ runner:
   val_check_interval: -1
   save_interval: 40
 
-  resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
+  # resume_dir: null # Optional: path to a saved checkpoint directory, such as 'checkpoints/global_step_10'. If not None, it will be used to resume training.
+  resume_dir: "/home/ubuntu/haitong-south-2/RLinf/logs/20260116-07:27:24-libero_spatial_ppo_openpi_quickstart/libero_spatial_ppo_openpi/checkpoints/global_step_240"
   ckpt_path: null  # Optional: path to a .pt checkpoint. If not None, it will be loaded after the model is instantiated (for evaluation).
 
 algorithm:

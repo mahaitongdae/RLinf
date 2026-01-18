@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import math
 import random
 from collections.abc import Sequence
@@ -29,6 +30,8 @@ from openpi.models_pytorch.pi0_pytorch import PI0Pytorch, make_att_2d_masks
 from rlinf.models.embodiment.base_policy import BasePolicy
 from rlinf.models.embodiment.modules.explore_noise_net import ExploreNoiseNet
 from rlinf.models.embodiment.modules.value_head import ValueHead
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -295,21 +298,55 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         data: dict[str, torch.Tensor],
         **kwargs,
     ) -> dict[str, Any]:
+        def _shape_info(value: Any) -> Any:
+            if torch.is_tensor(value):
+                return tuple(value.shape)
+            if isinstance(value, np.ndarray):
+                return value.shape
+            if isinstance(value, (list, tuple)):
+                return [_shape_info(item) for item in value]
+            if isinstance(value, dict):
+                return {key: _shape_info(val) for key, val in value.items()}
+            if hasattr(value, "shape"):
+                try:
+                    return tuple(value.shape)
+                except Exception:
+                    return type(value).__name__
+            return "scalar"
+
+        def _log_shape(name: str, value: Any) -> None:
+            pass
+            # logger.info("default_forward %s shape: %s", name, _shape_info(value))
+
         # get kwargs
         compute_values = kwargs.get("compute_values", False)
         chains = data["chains"]
         denoise_inds = data["denoise_inds"]
+        _log_shape("compute_values", compute_values)
+        _log_shape("chains", chains)
+        _log_shape("denoise_inds", denoise_inds)
+        _log_shape("data", data)
         # input transform
         observation = self.input_transform(data, transpose=False)
+        _log_shape("observation_dict", observation)
         observation = _model.Observation.from_dict(observation)
         images, img_masks, lang_tokens, lang_masks, state = (
             self._preprocess_observation(observation, train=False)
         )
+        _log_shape("images", images)
+        _log_shape("img_masks", img_masks)
+        _log_shape("lang_tokens", lang_tokens)
+        _log_shape("lang_masks", lang_masks)
+        _log_shape("state", state)
         # transfer to device
         device = chains.device
         images = [img.to(device) for img in images]
         img_masks = [img_mask.to(device) for img_mask in img_masks]
         state = state.to(device)
+        _log_shape("device", device)
+        _log_shape("images_device", images)
+        _log_shape("img_masks_device", img_masks)
+        _log_shape("state_device", state)
         # get log prob
         log_probs, value_t, entropy = self.get_log_prob_value(
             images,
@@ -321,18 +358,26 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
             denoise_inds,
             compute_values,
         )
+        _log_shape("log_probs", log_probs)
+        _log_shape("value_t", value_t)
+        _log_shape("entropy", entropy)
         log_probs = log_probs[
             :, :, : self.config.action_chunk, : self.config.action_env_dim
         ]
         entropy = entropy[
             :, :, : self.config.action_chunk, : self.config.action_env_dim
         ]
+        _log_shape("log_probs_sliced", log_probs)
+        _log_shape("entropy_sliced", entropy)
         # post process
         log_probs = log_probs.mean(dim=1)
         entropy = entropy.mean(dim=[1, 2, 3], keepdim=False)[
             :, None
         ]  # [:,None] to align with loss-mask shape
         value_t = value_t.mean(dim=-1, keepdim=False)
+        _log_shape("log_probs_mean", log_probs)
+        _log_shape("entropy_mean", entropy)
+        _log_shape("value_t_mean", value_t)
         return {
             "logprobs": log_probs,
             "values": value_t,
