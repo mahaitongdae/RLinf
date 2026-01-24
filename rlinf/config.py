@@ -80,7 +80,7 @@ SUPPORTED_TASK_TYPE = [
     "coding_online_rl",
     "sft",
 ]
-SUPPORTED_TRAINING_BACKENDS = ["megatron", "fsdp"]
+SUPPORTED_TRAINING_BACKENDS = ["megatron", "fsdp", "ddp"]
 __all__ = ["build_config"]
 
 
@@ -964,6 +964,18 @@ def validate_cfg(cfg: DictConfig) -> DictConfig:
             f"actor.global_batch_size ({cfg.actor.global_batch_size}) must be divisible by (actor.micro_batch_size ({cfg.actor.micro_batch_size}) * actor_world_size ({actor_world_size}))"
         )
         cfg.actor = validate_fsdp_cfg(cfg.actor, cfg.runner.get("resume_dir", None))
+    elif cfg.actor.training_backend == "ddp":
+        component_placement = HybridComponentPlacement(
+            cfg, Cluster(num_nodes=cfg.cluster.num_nodes)
+        )
+        actor_world_size = component_placement.get_world_size("actor")
+        assert (
+            cfg.actor.global_batch_size
+            % (cfg.actor.micro_batch_size * actor_world_size)
+            == 0
+        ), (
+            f"actor.global_batch_size ({cfg.actor.global_batch_size}) must be divisible by (actor.micro_batch_size ({cfg.actor.micro_batch_size}) * actor_world_size ({actor_world_size}))"
+        )
 
     if cfg.critic.use_critic_model and cfg.critic.training_backend == "megatron":
         cfg.critic = validate_megatron_cfg(cfg.critic)

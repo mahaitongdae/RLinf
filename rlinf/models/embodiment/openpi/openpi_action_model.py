@@ -22,6 +22,7 @@ from typing import Any, Literal
 import jax
 import numpy as np
 import torch
+import torch.nn.functional as F
 from openpi import transforms as _transforms
 from openpi.models import model as _model
 from openpi.models.pi0_config import Pi0Config
@@ -33,6 +34,45 @@ from rlinf.models.embodiment.modules.value_head import ValueHead
 
 logger = logging.getLogger(__name__)
 
+def _shape_info(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return tuple(value.shape)
+    if isinstance(value, np.ndarray):
+        return value.shape
+    if isinstance(value, (list, tuple)):
+        return [_shape_info(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _shape_info(val) for key, val in value.items()}
+    if hasattr(value, "shape"):
+        try:
+            return tuple(value.shape)
+        except Exception:
+            return type(value).__name__
+    return "scalar"
+
+def _dtype_info(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return value.dtype
+    if isinstance(value, np.ndarray):
+        return value.dtype
+    if isinstance(value, (list, tuple)):
+        return [_dtype_info(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _dtype_info(val) for key, val in value.items()}
+    if hasattr(value, "dtype"):
+        return value.dtype
+    return "scalar"
+
+def _device_info(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return value.device
+    if isinstance(value, np.ndarray):
+        return "not a tensor"
+    if isinstance(value, (list, tuple)):
+        return [f"device: {_device_info(item)}" for item in value]
+    if isinstance(value, dict):
+        return {key: f"device: {_device_info(val)}" for key, val in value.items()}
+    return "not a tensor"
 
 @dataclass(frozen=True)
 class OpenPi0Config(Pi0Config):
@@ -263,6 +303,8 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
             return self.sft_forward(**kwargs)
         elif forward_type == "default_forward":
             return self.default_forward(**kwargs)
+        elif forward_type == "awr_forward":
+            return self.awr_forward_v3(**kwargs)
         else:
             raise NotImplementedError
 
@@ -272,17 +314,448 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         return PI0Pytorch.forward(self, observation, actions)
 
     def awr_forward(self, data, **kwargs):
-        observation = data["observation"]
-        actions = data["actions"]
+        observation = self.input_transform(data, transpose=False)
+        # observation = self.precision_processor(observation)
+        def _log_shape(name: str, value: Any) -> None:
+            # pass
+            logger.info("awr_forward %s shape: %s", name, _shape_info(value))
+        
+        def _check_nan(tensor: torch.Tensor, name: str) -> bool:
+            """Check for NaN/Inf values and log detailed info if found."""
+            if torch.is_tensor(tensor):
+                has_nan = torch.isnan(tensor).any().item()
+                has_inf = torch.isinf(tensor).any().item()
+                if has_nan or has_inf:
+                    nan_count = torch.isnan(tensor).sum().item()
+                    inf_count = torch.isinf(tensor).sum().item()
+                    total = tensor.numel()
+                    logger.warning(
+                        f"awr_forward NaN/Inf detected in {name}: "
+                        f"NaN={nan_count}/{total} ({100*nan_count/total:.2f}%), "
+                        f"Inf={inf_count}/{total} ({100*inf_count/total:.2f}%), "
+                        f"shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+                        f"min={tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)].min().item() if (total - nan_count - inf_count) > 0 else 'N/A'}, "
+                        f"max={tensor[~torch.isnan(tensor) & ~torch.isinf(tensor)].max().item() if (total - nan_count - inf_count) > 0 else 'N/A'}"
+                    )
+                    return True
+            return False
+        
+        # _log_shape("data", data)
+        # logger.info("awr_forward observation dtype before from_dict: %s", _dtype_info(observation))
+        # logger.info("awr_forward observation devices before from_dict: %s", _device_info(observation))
+        # _log_shape("observation before from_dict", observation)
+        chains = data["chains"]
+        device = chains.device
+        observation = _model.Observation.from_dict(observation, device=device)  
+        # TODO: data is sent back to CPU here due to the decorator in Observation class, need to fix it.
+        
+        
+        actions = data["actions"].to(device).contiguous()
+        _check_nan(actions, "actions")
+        
+        # logger.info("awr_forward observation images device after from_dict: %s", _device_info(observation.images))
+        # logger.info("awr_forward observation image masks device after from_dict: %s", _device_info(observation.image_masks))
+        # _log_shape("observation after from_dict", observation)
+        # logger.info("awr_forward actions device: %s", _device_info(actions))
+
+
         # PI0Pytorch.forward returns per-step reconstruction loss (MSE) which is the
         # negative ELBO term for the flow-matching head. Use its negative as a
         # surrogate log-probability for AWR style weighting.
-        elbo = PI0Pytorch.forward(self, observation, actions)
-        logprobs = -elbo
+        # elbo = PI0Pytorch.forward(self, observation, actions)
+
+        # copying PI0Pytorch.forward implementation but without requiring input being
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=False)
+        ) 
+        device = next(self.parameters()).device
+        images = [img.to(device) for img in images]
+        img_masks = [img_mask.to(device) for img_mask in img_masks]
+        state = state.to(device)
+        _check_nan(state, "state")
+
+        # if noise is None:
+        noise = self.sample_noise(actions.shape, actions.device)
+        _check_nan(noise, "noise")
+
+        # if time is None:
+        time = self.sample_time(actions.shape[0], actions.device)
+        _check_nan(time, "time")
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+        _check_nan(x_t, "x_t")
+        _check_nan(u_t, "u_t")
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        _check_nan(prefix_embs, "prefix_embs")
+        
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        _check_nan(suffix_embs, "suffix_embs")
+        
+        if (
+            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+            == torch.bfloat16
+        ):
+            suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+            prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
+
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+
+        # Prepare attention masks
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+        (prefix_output, _), past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=att_2d_masks_4d,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, suffix_embs],
+            use_cache=True,
+        )
+        _check_nan(prefix_output, "prefix_output")
+
+        # _log_shape("prefix_output", prefix_output)
+        
+        suffix_out = self.get_suffix_out(
+            state,
+            prefix_pad_masks,
+            past_key_values,
+            x_t,
+            time,
+        )
+        # _check_nan(suffix_out, "suffix_out")
+        
+        v_t = self.action_out_proj(
+            suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+        )  # [bs,n_action_steps,max_action_dim]
+        _check_nan(v_t, "v_t")
+        
+        elbo = F.mse_loss(u_t, v_t, reduction="none")
+        logger.info("elbo mean value: %s", v_t.mean().item())
+        _check_nan(elbo, "elbo")
+        # _log_shape("loss", loss)
+        # value prediction
+        # if (
+        #     self.config.add_value_head
+        #     and compute_values
+        #     and not self.config.value_after_vlm
+        # ):
+        # raise ValueError("Stop here")
+
+        # # Apply gradient checkpointing if enabled
+        # def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
+        #     (_, suffix_out), _ = self.paligemma_with_expert.forward(
+        #         attention_mask=att_2d_masks_4d,
+        #         position_ids=position_ids,
+        #         past_key_values=None,
+        #         inputs_embeds=[prefix_embs, suffix_embs],
+        #         use_cache=False,
+        #         adarms_cond=[None, adarms_cond],
+        #     )
+        #     return suffix_out
+
+        # suffix_out = self._apply_checkpoint(
+        #     forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+        # )
+
+        # suffix_out = suffix_out[:, -self.config.action_horizon :]
+        # suffix_out = suffix_out.to(dtype=torch.float32)
+
+        # # Apply gradient checkpointing to final action projection if enabled
+        # def action_out_proj_func(suffix_out):
+        #     return self.action_out_proj(suffix_out)
+
+        # v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
+
+        # elbo = F.mse_loss(u_t, v_t, reduction="none")
+        
 
         # Align shape with action chunk/env dim if present
-        if logprobs.dim() >= 3:
-            logprobs = logprobs[
+        if elbo.dim() >= 3:
+            logprobs = elbo[
+                :, : self.config.action_chunk, : self.config.action_env_dim
+            ]
+        _check_nan(logprobs, "logprobs (final output)")
+        _log_shape("logprobs", logprobs)
+        _log_shape("elbo", elbo)
+        _log_shape("data", data)
+
+        return {
+            "logprobs": logprobs,
+            "values": None,
+            "entropy": None,
+            "elbo": elbo,
+        }
+        
+    def awr_forward_v2(self, data, **kwargs):
+        observation = self.input_transform(data, transpose=False)
+        # observation = self.precision_processor(observation)
+        # def _log_shape(name: str, value: Any) -> None:
+        #     # pass
+        #     logger.info("awr_forward %s shape: %s", name, _shape_info(value))
+        
+        # _log_shape("data", data)
+        # logger.info("awr_forward observation dtype before from_dict: %s", _dtype_info(observation))
+        # logger.info("awr_forward observation devices before from_dict: %s", _device_info(observation))
+        # _log_shape("observation before from_dict", observation)
+        chains = data["chains"]
+        device = chains.device
+        observation = _model.Observation.from_dict(observation, device=device)  
+        # TODO: data is sent back to CPU here due to the decorator in Observation class, need to fix it.
+        
+        actions = data["actions"].to(device).contiguous()
+        
+        # logger.info("awr_forward observation images device after from_dict: %s", _device_info(observation.images))
+        # logger.info("awr_forward observation image masks device after from_dict: %s", _device_info(observation.image_masks))
+        # _log_shape("observation after from_dict", observation)
+        # logger.info("awr_forward actions device: %s", _device_info(actions))
+
+
+        # PI0Pytorch.forward returns per-step reconstruction loss (MSE) which is the
+        # negative ELBO term for the flow-matching head. Use its negative as a
+        # surrogate log-probability for AWR style weighting.
+        # elbo = PI0Pytorch.forward(self, observation, actions)
+
+        # copying PI0Pytorch.forward implementation but without requiring input being
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=False)
+        ) 
+        device = next(self.parameters()).device
+        images = [img.to(device) for img in images]
+        img_masks = [img_mask.to(device) for img_mask in img_masks]
+        state = state.to(device)
+
+        # if noise is None:
+        noise = self.sample_noise(actions.shape, actions.device)
+
+        # if time is None:
+        time = self.sample_time(actions.shape[0], actions.device)
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        
+        if (
+            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+            == torch.bfloat16
+        ):
+            suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+            prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
+
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+
+        # Prepare attention masks
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+        (prefix_output, _), past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=att_2d_masks_4d,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, suffix_embs],
+            use_cache=True,
+        )
+
+        suffix_out = self.get_suffix_out(
+            state,
+            prefix_pad_masks,
+            past_key_values,
+            x_t,
+            time,
+        )
+        # _check_nan(suffix_out, "suffix_out")
+        
+        v_t = self.action_out_proj(
+            suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+        )  # [bs,n_action_steps,max_action_dim]
+        
+        elbo = F.mse_loss(u_t, v_t, reduction="none")
+        logger.info("elbo mean value: %s", v_t.mean().item())
+        # _log_shape("loss", loss)
+        # value prediction
+        # if (
+        #     self.config.add_value_head
+        #     and compute_values
+        #     and not self.config.value_after_vlm
+        # ):
+        # raise ValueError("Stop here")
+
+        # # Apply gradient checkpointing if enabled
+        # def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
+        #     (_, suffix_out), _ = self.paligemma_with_expert.forward(
+        #         attention_mask=att_2d_masks_4d,
+        #         position_ids=position_ids,
+        #         past_key_values=None,
+        #         inputs_embeds=[prefix_embs, suffix_embs],
+        #         use_cache=False,
+        #         adarms_cond=[None, adarms_cond],
+        #     )
+        #     return suffix_out
+
+        # suffix_out = self._apply_checkpoint(
+        #     forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+        # )
+
+        # suffix_out = suffix_out[:, -self.config.action_horizon :]
+        # suffix_out = suffix_out.to(dtype=torch.float32)
+
+        # # Apply gradient checkpointing to final action projection if enabled
+        # def action_out_proj_func(suffix_out):
+        #     return self.action_out_proj(suffix_out)
+
+        # v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
+
+        # elbo = F.mse_loss(u_t, v_t, reduction="none")
+        
+
+        # Align shape with action chunk/env dim if present
+        if elbo.dim() >= 3:
+            logprobs = elbo[
+                :, : self.config.action_chunk, : self.config.action_env_dim
+            ]
+
+        return {
+            "logprobs": logprobs,
+            "values": None,
+            "entropy": None,
+            "elbo": elbo,
+        }
+        
+    def awr_forward_v3(self, data, **kwargs):
+        observation = self.input_transform(data, transpose=False)
+        # observation = self.precision_processor(observation)
+        # def _log_shape(name: str, value: Any) -> None:
+        #     # pass
+        #     logger.info("awr_forward %s shape: %s", name, _shape_info(value))
+        
+        # _log_shape("data", data)
+        # logger.info("awr_forward observation dtype before from_dict: %s", _dtype_info(observation))
+        # logger.info("awr_forward observation devices before from_dict: %s", _device_info(observation))
+        # _log_shape("observation before from_dict", observation)
+        chains = data["chains"]
+        device = chains.device
+        observation = _model.Observation.from_dict(observation, device=device)  
+        # TODO: data is sent back to CPU here due to the decorator in Observation class, need to fix it.
+        
+        actions = data["actions"].to(device).contiguous()
+
+
+        # PI0Pytorch.forward returns per-step reconstruction loss (MSE) which is the
+        # negative ELBO term for the flow-matching head. Use its negative as a
+        # surrogate log-probability for AWR style weighting.
+        # elbo = PI0Pytorch.forward(self, observation, actions)
+
+        # copying PI0Pytorch.forward implementation but without requiring input being
+        images, img_masks, lang_tokens, lang_masks, state = (
+            self._preprocess_observation(observation, train=False)
+        ) 
+        device = next(self.parameters()).device
+        images = [img.to(device) for img in images]
+        img_masks = [img_mask.to(device) for img_mask in img_masks]
+        state = state.to(device)
+
+        # if noise is None:
+        noise = self.sample_noise(actions.shape, actions.device)
+
+        # if time is None:
+        time = self.sample_time(actions.shape[0], actions.device)
+
+        time_expanded = time[:, None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
+        
+        if (
+            self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+            == torch.bfloat16
+        ):
+            suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
+            prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
+
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+
+        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+
+        # Prepare attention masks
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        (_, suffix_out), _ = self.paligemma_with_expert.forward(
+                attention_mask=att_2d_masks_4d,
+                position_ids=position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, suffix_embs],
+                use_cache=False,
+                adarms_cond=[None, adarms_cond],
+            )
+        
+        suffix_out = suffix_out[:, -self.config.action_horizon :]
+        # suffix_out = suffix_out.to(dtype=torch.float32)
+        
+        v_t = self.action_out_proj(
+            suffix_out.to(dtype=self.action_out_proj.weight.dtype)
+        )  # [bs,n_action_steps,max_action_dim]
+        
+        elbo = F.mse_loss(u_t, v_t, reduction="none")
+        logger.info("elbo mean value: %s", v_t.mean().item())
+        # _log_shape("loss", loss)
+        # value prediction
+        # if (
+        #     self.config.add_value_head
+        #     and compute_values
+        #     and not self.config.value_after_vlm
+        # ):
+        # raise ValueError("Stop here")
+
+        # # Apply gradient checkpointing if enabled
+        # def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
+        #     (_, suffix_out), _ = self.paligemma_with_expert.forward(
+        #         attention_mask=att_2d_masks_4d,
+        #         position_ids=position_ids,
+        #         past_key_values=None,
+        #         inputs_embeds=[prefix_embs, suffix_embs],
+        #         use_cache=False,
+        #         adarms_cond=[None, adarms_cond],
+        #     )
+        #     return suffix_out
+
+        # suffix_out = self._apply_checkpoint(
+        #     forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+        # )
+
+        # suffix_out = suffix_out[:, -self.config.action_horizon :]
+        # suffix_out = suffix_out.to(dtype=torch.float32)
+
+        # # Apply gradient checkpointing to final action projection if enabled
+        # def action_out_proj_func(suffix_out):
+        #     return self.action_out_proj(suffix_out)
+
+        # v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
+
+        # elbo = F.mse_loss(u_t, v_t, reduction="none")
+        
+
+        # Align shape with action chunk/env dim if present
+        if elbo.dim() >= 3:
+            logprobs = elbo[
                 :, : self.config.action_chunk, : self.config.action_env_dim
             ]
 
@@ -298,21 +771,6 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         data: dict[str, torch.Tensor],
         **kwargs,
     ) -> dict[str, Any]:
-        def _shape_info(value: Any) -> Any:
-            if torch.is_tensor(value):
-                return tuple(value.shape)
-            if isinstance(value, np.ndarray):
-                return value.shape
-            if isinstance(value, (list, tuple)):
-                return [_shape_info(item) for item in value]
-            if isinstance(value, dict):
-                return {key: _shape_info(val) for key, val in value.items()}
-            if hasattr(value, "shape"):
-                try:
-                    return tuple(value.shape)
-                except Exception:
-                    return type(value).__name__
-            return "scalar"
 
         def _log_shape(name: str, value: Any) -> None:
             pass
@@ -454,6 +912,7 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
             "denoise_inds": outputs["denoise_inds"],
             "tokenized_prompt": processed_obs["tokenized_prompt"],
             "tokenized_prompt_mask": processed_obs["tokenized_prompt_mask"],
+            "actions": outputs["actions"],  # model-space actions for AWR training
         }
         forward_inputs.update(to_process_obs)
         forward_inputs.pop("prompt", None)

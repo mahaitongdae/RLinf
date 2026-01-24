@@ -45,6 +45,10 @@ def main(cfg) -> None:
         from rlinf.workers.actor.fsdp_sac_policy_worker import EmbodiedSACFSDPPolicy
 
         actor_worker_cls = EmbodiedSACFSDPPolicy
+    elif cfg.actor.training_backend == "ddp":
+        from rlinf.workers.actor.ddp_actor_worker import EmbodiedDDPActor
+
+        actor_worker_cls = EmbodiedDDPActor
     else:
         from rlinf.workers.actor.fsdp_actor_worker import EmbodiedFSDPActor
 

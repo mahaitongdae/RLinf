@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 from typing import Optional
 
 import torch
 
 from rlinf.algorithms.registry import register_advantage
+
+logger = logging.getLogger(__name__)
 from rlinf.algorithms.utils import kl_penalty, safe_normalize
 from rlinf.utils.utils import masked_mean
 
@@ -53,6 +56,10 @@ def compute_gae_advantages_and_returns(
     Returns:
         Tuple[torch.Tensor, torch.Tensor]: (advantages, returns)
     """
+    logger.info(
+        f"GAE inputs: rewards={rewards.shape}, values={values.shape if values is not None else None}, "
+        f"dones={dones.shape if dones is not None else None}, loss_mask={loss_mask.shape if loss_mask is not None else None}"
+    )
     T = rewards.shape[0]
     advantages = torch.zeros_like(rewards)
     returns = torch.zeros_like(rewards)
@@ -83,8 +90,45 @@ def compute_gae_advantages_and_returns(
     if normalize_returns:
         returns = safe_normalize(returns, loss_mask=loss_mask)
 
+    logger.info(
+        f"GAE outputs: advantages={advantages.shape}, returns={returns.shape}"
+    )
     return advantages, returns
 
+@register_advantage("grouped_gae")
+def compute_grouped_gae_advantages_and_returns(
+    rewards: torch.Tensor,
+    gamma: float = 1.0,
+    gae_lambda: float = 1.0,
+    values: Optional[torch.Tensor] = None,
+    normalize_advantages: bool = True,
+    normalize_returns: bool = False,
+    loss_mask: Optional[torch.Tensor] = None,
+    dones: Optional[torch.Tensor] = None,
+    group_size: int = 8,
+    **kwargs,   
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantages and returns for grouped GAE.
+    """
+    logger.info(
+        f"Grouped GAE inputs: rewards={rewards.shape}, values={values.shape if values is not None else None}, "
+        f"dones={dones.shape if dones is not None else None}, loss_mask={loss_mask.shape if loss_mask is not None else None}, "
+        f"group_size={group_size}"
+    )
+    advantages, returns = compute_gae_advantages_and_returns(
+        rewards=rewards,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        values=values,
+        normalize_advantages=normalize_advantages,
+        normalize_returns=normalize_returns,
+        loss_mask=loss_mask,
+        dones=dones,
+    )
+
+    logger.info(f"Grouped GAE outputs: advantages={advantages.shape}")
+    return advantages, None
 
 @register_advantage("grpo")
 def compute_grpo_advantages(
@@ -104,6 +148,9 @@ def compute_grpo_advantages(
     Returns:
         torch.Tensor: advantages
     """
+    logger.info(
+        f"GRPO inputs: rewards={rewards.shape}, loss_mask={loss_mask.shape}, group_size={group_size}"
+    )
     grouped_rewards = rewards.view(-1, group_size)
 
     grouped_reward_mean = grouped_rewards.mean(dim=-1, keepdim=True).expand_as(
@@ -113,11 +160,56 @@ def compute_grpo_advantages(
         grouped_rewards
     )
 
+    logger.info(f"Grouped reward mean={grouped_reward_mean.shape}, grouped reward std={grouped_reward_std.shape}")
+
     advantages = grouped_rewards - grouped_reward_mean
     advantages = advantages / (grouped_reward_std + 1e-6)
 
     advantages = (torch.zeros_like(loss_mask) + advantages.view(1, -1)) * loss_mask
 
+    logger.info(f"GRPO outputs: advantages={advantages.shape}")
+    return advantages, None
+
+@register_advantage("group_softmax")
+def compute_group_softmax_advantages(
+    rewards: torch.Tensor,
+    loss_mask: torch.Tensor,
+    group_size: int,
+    **kwargs,
+):
+    """
+    Compute group softmax advantages.
+
+    Args:
+        rewards (torch.Tensor): Reward or score values. Shape: [num_groups, group_size]
+        loss_mask (torch.Tensor): Loss mask for valid entries. Shape: [num_groups, group_size]
+        group_size (int): Group size for advantage computation.
+
+    Returns:
+        torch.Tensor: advantages
+    """
+    logger.info(
+        f"Group softmax inputs: rewards={rewards.shape}, loss_mask={loss_mask.shape}, group_size={group_size}"
+    )
+    grouped_rewards = rewards.view(-1, group_size)
+    temperature = kwargs.get("temperature", 1e-2)
+    advantages = torch.softmax(grouped_rewards / temperature, dim=0)
+
+    # grouped_reward_mean = grouped_rewards.mean(dim=-1, keepdim=True).expand_as(
+    #     grouped_rewards
+    # )
+    # grouped_reward_std = grouped_rewards.std(dim=-1, keepdim=True).expand_as(
+    #     grouped_rewards
+    # )
+
+    # logger.info(f"Grouped reward mean={grouped_reward_mean.shape}, grouped reward std={grouped_reward_std.shape}")
+
+    # advantages = grouped_rewards - grouped_reward_mean
+    # advantages = advantages / (grouped_reward_std + 1e-6)
+
+    advantages = (torch.zeros_like(loss_mask) + advantages.view(1, -1)) * loss_mask
+
+    logger.info(f"GRPO outputs: advantages={advantages.shape}")
     return advantages, None
 
 
@@ -149,6 +241,12 @@ def compute_reinpp_advantages(
     Returns:
         torch.Tensor: advantages
     """
+    logger.info(
+        f"ReinPP inputs: rewards={rewards.shape}, loss_mask={loss_mask.shape}, "
+        f"group_size={group_size}, use_reinpp_baseline={use_reinpp_baseline}, "
+        f"kl_beta={kl_beta}, logprob={logprob.shape if logprob is not None else None}, "
+        f"ref_logprob={ref_logprob.shape if ref_logprob is not None else None}"
+    )
     # first group baseline for reinforce++ baseline
     if use_reinpp_baseline:
         grouped_rewards = rewards.view(-1, group_size)  # [num_prompt, group_size]
@@ -183,4 +281,5 @@ def compute_reinpp_advantages(
 
     advantages = (advantages - mean) * rstd
 
+    logger.info(f"ReinPP outputs: advantages={advantages.shape}")
     return advantages, None

@@ -12,14 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+import logging
 import torch
 
 from rlinf.algorithms.registry import register_policy_loss
 from rlinf.algorithms.utils import huber_loss
 from rlinf.utils.utils import masked_mean, masked_mean_ratio
 
+logger = logging.getLogger(__name__)
+
+
+def _shape_info(value: Any) -> Any:
+    if torch.is_tensor(value):
+        return tuple(value.shape)
+    if isinstance(value, (list, tuple)):
+        return [_shape_info(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _shape_info(val) for key, val in value.items()}
+    if hasattr(value, "shape"):
+        try:
+            return tuple(value.shape)
+        except Exception:
+            return type(value).__name__
+    return "scalar"
+
+
+def _log_shape_map(prefix: str, mapping: dict[str, Any]) -> None:
+    if logger.isEnabledFor(logging.INFO):
+        logger.info("%s shapes: %s", prefix, {k: _shape_info(v) for k, v in mapping.items()})
 
 def compute_ppo_actor_loss(
     logprobs: torch.Tensor,
@@ -134,6 +156,32 @@ def compute_ppo_actor_loss(
         "actor/approx_kl": approx_kl.detach(),
         "actor/clip_fraction": clip_fraction.detach(),
     }
+    _log_shape_map(
+        "compute_ppo_actor_loss",
+        {
+            "logprobs": logprobs,
+            "old_logprobs": old_logprobs,
+            "advantages": advantages,
+            "loss_mask": loss_mask,
+            "loss_mask_sum": loss_mask_sum,
+            "loss_mask_ratio": loss_mask_ratio,
+            "ratio": ratio,
+            "approx_kl": approx_kl,
+            "clipped_ratio": clipped_ratio,
+            "policy_loss1": policy_loss1,
+            "policy_loss2": policy_loss2,
+            "clip_mask": clip_mask,
+            "policy_loss": policy_loss,
+            "policy_loss3": policy_loss3 if "policy_loss3" in locals() else None,
+            "dual_clip_mask": dual_clip_mask,
+            "dual_cliped_ratio": dual_cliped_ratio,
+            "ratio_for_metrics": ratio_for_metrics,
+            "clipped_ratio_for_metrics": clipped_ratio_for_metrics,
+            "dual_cliped_ratio_for_metrics": dual_cliped_ratio_for_metrics,
+            "loss_mask_for_metrics": loss_mask_for_metrics,
+            "clip_fraction": clip_fraction,
+        },
+    )
     return policy_loss, metrics_data
 
 
@@ -212,6 +260,27 @@ def compute_ppo_critic_loss(
         "critic/value_clip_ratio": value_clip_ratio.detach().item(),
         "critic/explained_variance": explained_variance.detach().item(),
     }
+    _log_shape_map(
+        "compute_ppo_critic_loss",
+        {
+            "values": values,
+            "returns": returns,
+            "prev_values": prev_values,
+            "loss_mask": loss_mask,
+            "loss_mask_sum": loss_mask_sum,
+            "loss_mask_ratio": loss_mask_ratio,
+            "value_pred_clipped": value_pred_clipped,
+            "value_loss_original": value_loss_original,
+            "value_loss_clipped": value_loss_clipped,
+            "value_loss": value_loss,
+            "value_clip_indicator": value_clip_indicator,
+            "masked_returns": masked_returns,
+            "masked_values": masked_values,
+            "var_returns": var_returns,
+            "var_diff": var_diff if "var_diff" in locals() else None,
+            "explained_variance": explained_variance,
+        },
+    )
     return value_loss, metrics_data
 
 
@@ -274,3 +343,63 @@ def compute_grpo_actor_loss_fn(**kwargs) -> tuple[torch.Tensor, dict]:
     metrics_data.update(actor_metrics_data)
 
     return actor_loss, metrics_data
+
+@register_policy_loss("awr_kl")
+def compute_awr_kl_actor_loss_fn(
+    logprobs: torch.Tensor,
+    old_logprobs: torch.Tensor,
+    clip_ratio_low: float,
+    clip_ratio_high: float,
+    advantages: torch.Tensor,
+    loss_mask: Optional[torch.Tensor] = None,
+    clip_ratio_c: Optional[float] = None,
+    loss_agg_func: Optional[Callable[..., torch.Tensor]] = masked_mean,
+    max_episode_steps: Optional[int] = None,
+    loss_mask_sum: Optional[torch.Tensor] = None,
+    critic_warmup: Optional[bool] = False,
+    **kwargs,
+    ) -> tuple[torch.Tensor, dict]:
+    """
+    Compute actor loss for Group Relative Policy Optimization (GRPO).
+
+    This function implements the PPO-style actor loss with clipping for GRPO.
+    Adapted from https://github.com/huggingface/trl/blob/main/trl/trainer/ppotrainer.py#L1122
+
+    Args:
+        log_prob (torch.Tensor): Current log probabilities
+        old_log_prob (torch.Tensor): Previous log probabilities
+        advantages (torch.Tensor): Advantage values of shape
+        clip_ratio_high (float): Upper clipping ratio for PPO
+        clip_ratio_low (float): Lower clipping ratio for PPO
+        loss_mask (Optional[torch.Tensor]): Mask tensor of shape to apply to the loss
+
+    Returns:
+        Tuple[torch.Tensor, Dict]: Policy gradient loss and metrics dictionary containing:
+            - actor/loss: Total actor loss
+            - actor/policy_loss: Policy gradient loss
+            - actor/clip_fraction: Fraction of clipped policy gradient loss
+            - actor/ppo_kl: Approximate KL divergence
+    """
+    loss_mask_ratio = None
+
+    if (
+        max_episode_steps is not None
+        and loss_mask_sum is not None
+        and loss_mask is not None
+    ):
+        loss_mask_ratio = (loss_mask_sum * 1.0) / max_episode_steps
+        loss_agg_func = masked_mean_ratio
+    metrics_data = {}
+    loss = logprobs * advantages
+    loss = loss_agg_func(loss, loss_mask, loss_mask_ratio)
+    metric = {
+        "actor/loss": loss.detach().item(),
+        "weights_mean": advantages.mean().detach().item(),
+        "weights_std": advantages.std().detach().item(),
+        "weights_max": advantages.max().detach().item(),
+        "weights_min": advantages.min().detach().item(),
+        }
+    logger.info("AWR KL actor loss metrics: %s", metric)
+    metrics_data.update(metric)
+
+    return loss, metrics_data

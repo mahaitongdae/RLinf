@@ -22,6 +22,10 @@ def get_actor_worker(cfg: DictConfig) -> Worker:
         from .fsdp_actor_worker import FSDPActor
 
         return FSDPActor
+    elif cfg.actor.training_backend == "ddp":
+        from .ddp_actor_worker import DDPModelManager
+
+        return DDPModelManager
     elif cfg.actor.training_backend == "megatron":
         from .megatron_actor_worker import MegatronActor
 

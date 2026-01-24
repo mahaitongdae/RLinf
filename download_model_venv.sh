@@ -5,9 +5,14 @@
 # hf download RLinf/RLinf-Pi0-ManiSkill-25Main-SFT \
 # --local-dir /workspace/models/RLinf-Pi0-ManiSkill-25Main-SFT
 
+source .venv/bin/activate
+
+# wandb login <YOUR_WANDB_TOKEN>
+export HF_TOKEN=${HF_TOKEN:-"your_hf_token_here"}
+
 current_dir=$(pwd)
 
-mkdir -p /.cache/models
+mkdir -p ~/cache/models
 
 hf download RLinf/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT \
 --local-dir ~/cache/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT
@@ -27,6 +32,8 @@ fi
 hf download --repo-type dataset RLinf/maniskill_assets \
 --local-dir ${assets_dir}
 
+# hf download --repo-type dataset physical-intelligence/libero --local-dir ~/cache/dataset/libero
+
 # bash examples/embodiment/run_embodiment.sh maniskill_ppo_openpi
 
-# bash examples/embodiment/run_embodiment.sh libero_spatial_ppo_openpi_quickstart
+# bash examples/embodiment/run_embodiment.sh libero_spatial_grpo_openpi

@@ -1026,6 +1026,9 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                     with self.amp_context:
                         output_dict = self.model(
                             data=data,
+                            forward_type=self.cfg.algorithm.get(
+                                "forward_type", "default_forward"
+                            ),
                             compute_logprobs=True,
                             compute_entropy=self.cfg.algorithm.entropy_bonus > 0,
                             compute_values=compute_values,
