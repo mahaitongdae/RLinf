@@ -170,6 +170,48 @@ def compute_grpo_advantages(
     logger.info(f"GRPO outputs: advantages={advantages.shape}")
     return advantages, None
 
+@register_advantage("grpo_square")
+def compute_grpo_square_advantages(
+    rewards: torch.Tensor,
+    loss_mask: torch.Tensor,
+    group_size: int,
+    **kwargs,
+):
+    """
+    Compute GRPO advantages.
+
+    Args:
+        rewards (torch.Tensor): Reward or score values. Shape: [num_groups, group_size]
+        loss_mask (torch.Tensor): Loss mask for valid entries. Shape: [num_groups, group_size]
+        group_size (int): Group size for advantage computation.
+
+    Returns:
+        torch.Tensor: advantages
+    """
+    logger.info(
+        f"GRPO inputs: rewards={rewards.shape}, loss_mask={loss_mask.shape}, group_size={group_size}"
+    )
+    grouped_rewards = rewards.view(-1, group_size)
+
+    grouped_reward_mean = grouped_rewards.mean(dim=-1, keepdim=True).expand_as(
+        grouped_rewards
+    )
+    grouped_reward_std = grouped_rewards.std(dim=-1, keepdim=True).expand_as(
+        grouped_rewards
+    )
+
+    logger.info(f"Grouped reward mean={grouped_reward_mean.shape}, grouped reward std={grouped_reward_std.shape}")
+
+    advantages = grouped_rewards - grouped_reward_mean
+    advantages = advantages / (grouped_reward_std + 1e-6)
+    advantages = torch.where(advantages > 0, advantages ** 2, advantages)
+    # advantages = torch.clip(advantages, min=-2.0, max=torch.inf)
+
+    advantages = (torch.zeros_like(loss_mask) + advantages.view(1, -1)) * loss_mask
+
+    logger.info(f"GRPO outputs: advantages={advantages.shape}")
+    return advantages, None
+
 @register_advantage("group_softmax")
 def compute_group_softmax_advantages(
     rewards: torch.Tensor,
@@ -206,6 +248,47 @@ def compute_group_softmax_advantages(
 
     # advantages = grouped_rewards - grouped_reward_mean
     # advantages = advantages / (grouped_reward_std + 1e-6)
+
+    advantages = (torch.zeros_like(loss_mask) + advantages.view(1, -1)) * loss_mask
+
+    logger.info(f"GRPO outputs: advantages={advantages.shape}")
+    return advantages, None
+
+@register_advantage("group_linear")
+def compute_group_linear_advantages(
+    rewards: torch.Tensor,
+    loss_mask: torch.Tensor,
+    group_size: int,
+    **kwargs,
+):
+    """
+    Compute group softmax advantages.
+
+    Args:
+        rewards (torch.Tensor): Reward or score values. Shape: [num_groups, group_size]
+        loss_mask (torch.Tensor): Loss mask for valid entries. Shape: [num_groups, group_size]
+        group_size (int): Group size for advantage computation.
+
+    Returns:
+        torch.Tensor: advantages
+    """
+    logger.info(
+        f"Group softmax inputs: rewards={rewards.shape}, loss_mask={loss_mask.shape}, group_size={group_size}"
+    )
+    grouped_rewards = rewards.view(-1, group_size)
+
+    grouped_reward_mean = grouped_rewards.mean(dim=-1, keepdim=True).expand_as(
+        grouped_rewards
+    )
+    grouped_reward_std = grouped_rewards.std(dim=-1, keepdim=True).expand_as(
+        grouped_rewards
+    )
+
+    # logger.info(f"Grouped reward mean={grouped_reward_mean.shape}, grouped reward std={grouped_reward_std.shape}")
+
+    advantages = grouped_rewards - grouped_reward_mean
+    advantages = advantages / (grouped_reward_std + 1e-6)
+    advantages = torch.clip(advantages, min=-1.0, max=torch.inf)
 
     advantages = (torch.zeros_like(loss_mask) + advantages.view(1, -1)) * loss_mask
 

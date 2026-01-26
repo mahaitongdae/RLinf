@@ -90,6 +90,9 @@ class OpenPi0Config(Pi0Config):
     noise_logvar_range: list = field(
         default_factory=lambda: [0.08, 0.16]
     )  # [min_std, max_std]
+    
+    # sampling noise
+    sampling_addtive_noise: float = 0.0
     # hyper-parameters
     action_chunk: int = 5  # action chunk
     action_env_dim: int = 7  # for environment action dim
@@ -304,7 +307,7 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         elif forward_type == "default_forward":
             return self.default_forward(**kwargs)
         elif forward_type == "awr_forward":
-            return self.awr_forward_v3(**kwargs)
+            return self.awr_forward_v2(**kwargs)
         else:
             raise NotImplementedError
 
@@ -903,9 +906,17 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         outputs = self.sample_actions(
             observation, mode=mode, compute_values=compute_values
         )
+        outputs["actions"] = outputs["actions"] + self.config.sampling_addtive_noise * torch.randn_like(outputs["actions"])
+        # logging.info(
+        #     "output action mean over [B, T]: %s",
+        #     outputs["actions"].mean(dim=(0, 1)).cpu().numpy()
+        # )
+        # logging.info("output action std over [B, T]: %s", outputs["actions"].std(dim=(0, 1)).cpu().numpy())
         actions = self.output_transform(
             {"actions": outputs["actions"], "state": observation.state}
         )["actions"].numpy()
+        # logging.info("output action mean after output_transform over [B, T]: %s", actions.mean(axis=(0, 1)))
+        # logging.info("output action std after output_transform over [B, T]: %s", actions.std(axis=(0, 1)))
 
         forward_inputs = {
             "chains": outputs["chains"],

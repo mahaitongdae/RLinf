@@ -130,6 +130,8 @@ actor:
   model:
     model_path: "/home/ubuntu/cache/models/RLinf-Pi0-LIBERO-Spatial-Object-Goal-SFT"
     num_action_chunks: 5 # interface for the env
+    openpi:
+      sampling_addtive_noise: 0.05
     # add_value_head: True
     # # openpi specific parameters
     # openpi:

@@ -21,8 +21,8 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: "libero_spatial_awr_openpi_ddp"
-    logger_backends: ["tensorboard"] # wandb, swanlab
+    experiment_name: "libero_spatial_awr_openpi_ddp-${algorithm.adv_type}"
+    logger_backends: ["tensorboard", "wandb"] # wandb, swanlab
 
   max_epochs: 1000
   max_steps: -1
@@ -49,7 +49,7 @@ algorithm:
   forward_type: awr_forward  # Use AWR-style flow-matching forward
 
   update_epoch: 2
-  adv_type: grpo
+  adv_type: grpo_square
   loss_type: awr_kl
   loss_agg_func: "token-mean" 
   kl_beta: 0.0
@@ -124,6 +124,7 @@ actor:
   global_batch_size: 2048 # maximum : global batch size = micro batch size * actor num_processes.
   seed: 42
   enable_offload: False
+  train_flow_head_only: False
 
   # Override the default values in model/pi0
   model:

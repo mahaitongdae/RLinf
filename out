@@ -1,0 +1,6 @@
+Service restarts being deferred:
+ systemctl restart irqbalance.service
+ systemctl restart networkd-dispatcher.service
+ systemctl restart packagekit.service
+ systemctl restart polkit.service
+ systemctl restart unattended-upgrades.service
