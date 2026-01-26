@@ -99,6 +99,7 @@ class OpenPi0Config(Pi0Config):
     num_steps: int = 10  # denoise steps
     # training config
     train_expert_only: bool = False
+    update_action_expert_only: bool = False  # only compute gradient for gemma_expert
     safe_get_logprob: bool = False
     joint_logprob: bool = False  # designed for flow-noise
     double_layer: bool = False  # designed for flow-sde without acceleration
@@ -503,22 +504,12 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         #     # pass
         #     logger.info("awr_forward %s shape: %s", name, _shape_info(value))
         
-        # _log_shape("data", data)
-        # logger.info("awr_forward observation dtype before from_dict: %s", _dtype_info(observation))
-        # logger.info("awr_forward observation devices before from_dict: %s", _device_info(observation))
-        # _log_shape("observation before from_dict", observation)
         chains = data["chains"]
         device = chains.device
         observation = _model.Observation.from_dict(observation, device=device)  
         # TODO: data is sent back to CPU here due to the decorator in Observation class, need to fix it.
         
         actions = data["actions"].to(device).contiguous()
-        
-        # logger.info("awr_forward observation images device after from_dict: %s", _device_info(observation.images))
-        # logger.info("awr_forward observation image masks device after from_dict: %s", _device_info(observation.image_masks))
-        # _log_shape("observation after from_dict", observation)
-        # logger.info("awr_forward actions device: %s", _device_info(actions))
-
 
         # PI0Pytorch.forward returns per-step reconstruction loss (MSE) which is the
         # negative ELBO term for the flow-matching head. Use its negative as a
@@ -565,11 +556,13 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+        # When update_action_expert_only is True, detach prefix_embs so gradients only flow through gemma_expert
+        forward_prefix_embs = prefix_embs.detach() if self.config.update_action_expert_only else prefix_embs
         (prefix_output, _), past_key_values = self.paligemma_with_expert.forward(
             attention_mask=att_2d_masks_4d,
             position_ids=position_ids,
             past_key_values=None,
-            inputs_embeds=[prefix_embs, suffix_embs],
+            inputs_embeds=[forward_prefix_embs, suffix_embs],
             use_cache=True,
         )
 
