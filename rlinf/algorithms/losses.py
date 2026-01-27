@@ -403,3 +403,34 @@ def compute_awr_kl_actor_loss_fn(
     metrics_data.update(metric)
 
     return loss, metrics_data
+
+
+@register_policy_loss("awr_kl_with_critic")
+def compute_awr_kl_with_critic_actor_loss_fn(**kwargs) -> tuple[torch.Tensor, dict]:
+    """
+    Compute PPO actor loss function.
+
+    Args:
+        logprobs (torch.Tensor): Log probabilities of actions
+        values (torch.Tensor): Current value predictions
+        old_log_prob (torch.Tensor): Previous log probabilities
+        advantages (torch.Tensor): Advantage values
+        returns (torch.Tensor): Return values
+        prev_values (torch.Tensor): Previous value predictions
+        clip_ratio_low (float): Lower clipping ratio for PPO
+        clip_ratio_high (float): Upper clipping ratio for PPO
+        value_clip (float): Value clipping threshold
+        huber_delta (float): Huber loss delta parameter
+
+    Returns:
+        Tuple[torch.Tensor, Dict]: Loss and metrics dictionary
+    """
+    metrics_data = {}
+    actor_loss, actor_metrics_data = compute_awr_kl_actor_loss_fn(**kwargs)
+    critic_loss, critic_metrics_data = compute_ppo_critic_loss(**kwargs)
+
+    loss = actor_loss + critic_loss
+    metrics_data.update(actor_metrics_data)
+    metrics_data.update(critic_metrics_data)
+
+    return loss, metrics_data

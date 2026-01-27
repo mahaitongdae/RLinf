@@ -581,6 +581,7 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         
         elbo = F.mse_loss(u_t, v_t, reduction="none")
         logger.info("elbo mean value: %s", v_t.mean().item())
+        compute_values = kwargs.get("compute_values", False)
         # _log_shape("loss", loss)
         # value prediction
         # if (
@@ -589,7 +590,25 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
         #     and not self.config.value_after_vlm
         # ):
         # raise ValueError("Stop here")
-
+        if (
+            self.config.add_value_head
+            and compute_values
+            and not self.config.value_after_vlm
+        ):
+            # use chunk critic input
+            # if self.config.chunk_critic_input:
+            #     suffix_out_value = torch.mean(
+            #         suffix_out[:, : self.config.action_chunk], dim=1, keepdim=False
+            #     )
+            # else:
+            #     suffix_out_value = torch.mean(suffix_out, dim=1, keepdim=False)
+            suffix_out_value = suffix_out
+            # detach critic input
+            if self.config.detach_critic_input:
+                suffix_out_value = suffix_out_value.detach()
+            value_t = self.value_head(suffix_out_value)[:, 0]
+        else:
+            value_t = torch.zeros((actions.shape[0]), device=device)
         # # Apply gradient checkpointing if enabled
         # def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
         #     (_, suffix_out), _ = self.paligemma_with_expert.forward(
@@ -626,7 +645,7 @@ class OpenPi0ForRLActionPrediction(BasePolicy, PI0Pytorch):
 
         return {
             "logprobs": logprobs,
-            "values": None,
+            "values": value_t,
             "entropy": None,
             "elbo": elbo,
         }

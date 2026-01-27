@@ -795,7 +795,7 @@ class EmbodiedDDPActor(DDPModelManager, Worker):
                         data["top_k"] = self.cfg.algorithm.sampling_params.top_k
 
                     compute_values = (
-                        True if self.cfg.algorithm.adv_type == "gae" else False
+                        True if "gae" in self.cfg.algorithm.adv_type else False
                     )
 
                     with self.amp_context:
