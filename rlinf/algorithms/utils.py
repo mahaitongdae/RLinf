@@ -112,7 +112,7 @@ def preprocess_embodied_advantages_inputs(
     )
     dones = flattened_dones_full[-(n_steps + 1) :]
 
-    if kwargs["adv_type"] == "gae":
+    if kwargs["adv_type"] in ["gae", "grouped_gae", "grouped_gae_clipped"] and values is not None:
         flattened_values_full = values.transpose(1, 2).reshape(
             (num_chunk + 1) * chunk_size, bsz
         )

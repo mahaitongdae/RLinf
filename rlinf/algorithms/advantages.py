@@ -130,6 +130,47 @@ def compute_grouped_gae_advantages_and_returns(
     logger.info(f"Grouped GAE outputs: advantages={advantages.shape}")
     return advantages, None
 
+@register_advantage("grouped_gae_clipped")
+def compute_grouped_gae_clipped_advantages_and_returns(
+    rewards: torch.Tensor,
+    gamma: float = 1.0,
+    gae_lambda: float = 1.0,
+    values: Optional[torch.Tensor] = None,
+    normalize_advantages: bool = True,
+    normalize_returns: bool = False,
+    loss_mask: Optional[torch.Tensor] = None,
+    dones: Optional[torch.Tensor] = None,
+    group_size: int = 8,
+    clip_ratio: float = 0.2,
+    **kwargs,   
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Compute advantages and returns for grouped GAE.
+    """
+    logger.info(
+        f"Grouped GAE inputs: rewards={rewards.shape}, values={values.shape if values is not None else None}, "
+        f"dones={dones.shape if dones is not None else None}, loss_mask={loss_mask.shape if loss_mask is not None else None}, "
+        f"group_size={group_size}"
+    )
+    advantages, returns = compute_gae_advantages_and_returns(
+        rewards=rewards,
+        gamma=gamma,
+        gae_lambda=gae_lambda,
+        values=values,
+        normalize_advantages=normalize_advantages,
+        normalize_returns=normalize_returns,
+        loss_mask=loss_mask,
+        dones=dones,
+    )
+    
+    grouped_advantages = advantages.view(-1, group_size)
+    grouped_advantages = torch.softmax(grouped_advantages, dim=-1) * group_size
+    grouped_advantages = torch.clip(grouped_advantages, min=1-clip_ratio, max=1+clip_ratio)
+    advantages = grouped_advantages.view(-1)
+
+    logger.info(f"Grouped GAE outputs: advantages={advantages.shape}")
+    return advantages, None
+
 @register_advantage("grpo")
 def compute_grpo_advantages(
     rewards: torch.Tensor,

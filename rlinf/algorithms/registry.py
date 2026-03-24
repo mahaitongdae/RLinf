@@ -104,7 +104,11 @@ def calculate_adv_and_returns(**kwargs) -> tuple[torch.Tensor, Optional[torch.Te
     task_type = kwargs["task_type"]
     if task_type == "embodied":
         kwargs = preprocess_embodied_advantages_inputs(**kwargs)
-        if adv_type != "gae":
+        # Skip calculate_scores for GAE-based methods that use values
+        # (they need the full timestep structure for value bootstrapping)
+        use_values = kwargs.get("values") is not None
+        skip_score_calc = adv_type == "gae" or (adv_type in ["grouped_gae", "grouped_gae_clipped"] and use_values)
+        if not skip_score_calc:
             kwargs = calculate_scores(**kwargs)
         advantages, returns = fn(**kwargs)
         res = postprocess_embodied_advantages_outputs(
